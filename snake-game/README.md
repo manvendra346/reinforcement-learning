@@ -1,50 +1,44 @@
-# Snake Game with Subtle Fading Glow Effect
+# Snake Game with Reinforcement Learning
 
-This project contains two versions of the classic Snake game implemented in Python using Pygame:
+A self-playing Snake game that trains a neural network agent using policy gradient RL.
 
 ## Files
-- `snake_game.py` - Original Snake game
-- `snake_game_glow.py` - Enhanced version with subtle fading glow effect
+- `snake_game.py` - Game loop, training logic, and rendering
+- `nn.py` - Neural network definition and state encoder
 
-## Features of the Glow Version
-- **Subtle fading rectangular glow** - Soft, professional glow effect around snake and food
-- **Pure rectangular shapes** - No curved corners, maintains classic Snake aesthetics
-- **Larger 800x600 window** - Better visual experience and gameplay area
-- **Improved collision detection** - Food properly aligns with snake movement grid
-- **Soft color palette** - Light green snake glow, light red/pink food glow
-- **Centered game over message** - Improved user interface
-- **Virtual environment ready** - Dependencies managed in `venv/`
+## How it works
 
-## How to Play
-1. Navigate to the snake-game directory:
-   ```bash
-   cd /home/manvendras/claude-test/snake-game
-   ```
+The agent observes a 2408-dimensional state vector:
+- **2400 values** — 60×40 grid with 1s where the snake body is
+- **2 values** — normalized food position
+- **2 values** — normalized head position
+- **4 values** — one-hot direction (UP / DOWN / LEFT / RIGHT)
 
-2. Activate the virtual environment:
-   ```bash
-   source venv/bin/activate
-   ```
+This is fed through a 2-layer feed-forward network that outputs a probability over 4 actions. The agent is trained with a simple policy gradient: actions that led to higher rewards are reinforced.
 
-3. Play the glowing version:
-   ```bash
-   python3 snake_game_glow.py
-   ```
+**Reward shaping:**
+- `-0.4` per step (discourages wandering)
+- `+2.0` when moving closer to food
+- `+20.0` for eating food
+- `-30.0` for dying (wall or self-collision)
 
-   Or play the original version:
-   ```bash
-   python3 snake_game.py
-   ```
+Exploration uses epsilon-greedy decay from 1.0 → 0.1 over 100k steps.
 
-## Game Controls
-- **Arrow Keys** - Move the snake in four directions
-- **Eat the glowing food** - Grow longer and increase your score
-- **Avoid collisions** - Don't hit the walls or your own tail
-- **Game Over** - Press 'Q' to quit or 'C' to play again
+## Setup
+
+```bash
+cd snake-game
+source venv/bin/activate
+python snake_game.py
+```
 
 ## Requirements
 - Python 3.x
-- Pygame 2.0+ (already installed in the virtual environment)
+- PyTorch
+- Pygame 2.0+
+- Matplotlib
 
 ## Notes
-The ALSA audio errors shown on startup are harmless and related to the WSL2 environment - the game functions perfectly without audio.
+- ALSA audio warnings on startup are harmless (WSL2 environment)
+- A live training loss plot appears alongside the game window
+- Close the game window to stop training and display the final loss curve

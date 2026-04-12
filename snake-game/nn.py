@@ -1,44 +1,47 @@
 import torch
 import torch.nn as nn
 
+GRID_COLS = 60   # DIS_WIDTH  / SNAKE_BLOCK = 600 / 10
+GRID_ROWS = 40   # DIS_HEIGHT / SNAKE_BLOCK = 400 / 10
+INPUT_DIM = GRID_COLS * GRID_ROWS + 2 + 2 + 4  # 2408: grid + food_norm + head_norm + direction
+
+
+def build_state(snake_list, foodx, foody, head_x, head_y, current_direction, device):
+    """Encode raw game values into a normalized input tensor of shape (INPUT_DIM,).
+
+    Args:
+        snake_list: List of [x, y] pixel coordinates (head to tail)
+        foodx, foody: Food position in pixels
+        head_x, head_y: Snake head position in pixels
+        current_direction: One-hot list [UP, DOWN, LEFT, RIGHT]
+        device: torch device
+
+    Returns:
+        Tensor of shape (INPUT_DIM,)
+    """
+    with torch.no_grad():
+        grid = torch.zeros(GRID_ROWS, GRID_COLS, device=device)
+        for sx, sy in snake_list:
+            x, y = int(sx // 10), int(sy // 10)
+            if 0 <= x < GRID_COLS and 0 <= y < GRID_ROWS:
+                grid[y][x] = 1
+
+    food_norm = torch.tensor([foodx / 600.0, foody / 400.0], dtype=torch.float32, device=device)
+    head_norm  = torch.tensor([head_x / 600.0, head_y / 400.0], dtype=torch.float32, device=device)
+    direction  = torch.tensor(current_direction, dtype=torch.float32, device=device)
+    return torch.cat((grid.flatten(), food_norm, head_norm, direction))
+
 
 class snake_NN(nn.Module):
-    GRID_COLS = 60   # DIS_WIDTH  / SNAKE_BLOCK = 600 / 10
-    GRID_ROWS = 40   # DIS_HEIGHT / SNAKE_BLOCK = 400 / 10
-    GRID_SIZE = GRID_COLS * GRID_ROWS   # 2400
-    INPUT_DIM = GRID_SIZE + 2 + 2 + 4  # 2408
-
     def __init__(self, hidden_dim=256, num_classes=4):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(self.INPUT_DIM, hidden_dim),
+            nn.Linear(INPUT_DIM, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, num_classes),
             nn.Softmax(dim=-1)
         )
 
-    def build_state(self, snake_list, food_pos, head, current_direction):
-        # Infer device from model weights — all tensors built here match it
-        dev = next(self.parameters()).device
-
-        # Grid: built without gradients (it's just a lookup, not a learnable op)
-        with torch.no_grad():
-            grid = torch.zeros(self.GRID_ROWS, self.GRID_COLS, device=dev)
-            for sx, sy in snake_list:
-                x = int(sx // 10)
-                y = int(sy // 10)
-                if 0 <= x < self.GRID_COLS and 0 <= y < self.GRID_ROWS:
-                    grid[y][x] = 1
-
-        # Normalize positions to [0, 1]
-        norm = torch.tensor([600.0, 400.0], device=dev)
-        food_norm = food_pos.float().to(dev) / norm
-        head_norm  = head.float().to(dev)    / norm
-
-        direction = torch.tensor(current_direction, dtype=torch.float32, device=dev)
-
-        return torch.cat((grid.flatten(), food_norm, head_norm, direction))
-
-    def forward(self, snake_list, food_pos, head, current_direction):
-        state = self.build_state(snake_list, food_pos, head, current_direction)
+    def forward(self, state):
+        """Forward pass on a pre-built state tensor."""
         return self.net(state)
