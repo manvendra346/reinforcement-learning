@@ -1,6 +1,5 @@
 import pygame
 import random
-from collections import deque
 from nn import snake_NN, build_state
 import torch
 import matplotlib.pyplot as plt
@@ -17,25 +16,20 @@ SNAKE_BLOCK = 10
 SNAKE_SPEED = 300
 
 ## Training hyperparameters
-BATCH_SIZE = 128
-BUFFER_SIZE = 100_000
-LR = 0.02
-HIDDEN_DIM = 512
-
-EPSILON_MIN   = 0.1
-EPSILON_DECAY = 0.995
-EXPLORATION_STEPS = 200_000
+LR = 0.001
+GAMMA = 0.99
+ENTROPY_COEFF = 0.01
 
 ## Reward shaping
-DEATH_PENALTY   = -50.0
-STEP_PENALTY    = -0.1
-DISTANCE_REWARD = 0.2
-FOOD_REWARD     = 70.0
+DEATH_PENALTY   = -1.0
+STEP_PENALTY    = -0.01
+DISTANCE_REWARD = 0.02
+FOOD_REWARD     = 1.0
 
 ## Starvation limit: if the snake goes this many steps without eating, it dies
-MAX_STEPS_WITHOUT_FOOD = 200
+MAX_STEPS_WITHOUT_FOOD = 300
 
-PLOT_REFRESH_INTERVAL = 50
+PLOT_REFRESH_INTERVAL = 50  # episodes between plot updates
 
 ## Direction helpers
 DIRECTION_MAP  = {0: "UP", 1: "DOWN", 2: "LEFT", 3: "RIGHT"}
@@ -58,20 +52,19 @@ score_font = pygame.font.SysFont("comicsansms", 35)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-model     = snake_NN(hidden_dim=HIDDEN_DIM).to(device)
+model     = snake_NN(hidden1=128, hidden2=64).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 
-## Replay buffer & training state
-replay_buffer = deque(maxlen=BUFFER_SIZE)
-loss_history  = []
-TOTAL_STEPS   = 0
-EPSILON       = 1.0
+## Training state
+episode_trajectory = []   # list of (state_tensor, action_idx, reward)
+episode_count      = 0
+loss_history       = []
 
 ## Live loss plot
 plt.ion()
 fig, ax = plt.subplots(figsize=(6, 3))
 ax.set_title("Training Loss")
-ax.set_xlabel("Step")
+ax.set_xlabel("Episode")
 ax.set_ylabel("Loss")
 loss_line, = ax.plot([], [], color="cyan", linewidth=0.8)
 fig.tight_layout()
@@ -105,25 +98,45 @@ def generate_food(snake_list):
             return foodx, foody
 
 
-def train_step():
-    batch = random.sample(replay_buffer, BATCH_SIZE)
-    states, actions, rewards = zip(*batch)
+def train_step(trajectory):
+    """Train on one completed episode using REINFORCE with discounted returns."""
+    if len(trajectory) == 0:
+        return
+
+    states, actions, rewards = zip(*trajectory)
+
+    # Compute discounted returns G_t for each timestep
+    returns = []
+    G = 0.0
+    for r in reversed(rewards):
+        G = r + GAMMA * G
+        returns.append(G)
+    returns.reverse()
+    returns = torch.tensor(returns, dtype=torch.float32, device=device)
+
+    # Normalize returns (variance reduction)
+    if len(returns) > 1:
+        returns = (returns - returns.mean()) / (returns.std() + 1e-8)
 
     states  = torch.stack(states)
     actions = torch.tensor(actions, device=device)
-    rewards = torch.tensor(rewards, dtype=torch.float32, device=device)
 
-    probs     = model.net(states)
-    # Clamp to avoid log(0) → -inf which causes NaN loss when model is overconfident
+    probs     = model(states)
     log_probs = torch.log(probs.clamp(min=1e-8))
-    chosen    = log_probs[torch.arange(BATCH_SIZE), actions]
+    chosen    = log_probs[torch.arange(len(actions)), actions]
 
-    loss = -(chosen * rewards).mean()
+    pg_loss = -(chosen * returns).mean()
+
+    # Entropy bonus: prevents premature policy collapse
+    entropy = -(probs * log_probs).sum(dim=-1).mean()
+    loss = pg_loss - ENTROPY_COEFF * entropy
+
     optimizer.zero_grad()
     loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
     optimizer.step()
 
-    loss_history.append(loss.item())
+    loss_history.append(pg_loss.item())
 
 
 def reset_episode():
@@ -143,21 +156,28 @@ def reset_episode():
 
 
 def die(s, foodx, foody, x1, y1):
-    """Record a death transition and return a fresh episode state + new food."""
-    global EPSILON
+    """Record death, train on the episode, return fresh state + new food."""
+    global episode_count
+
     dead_state = build_state(
         s["snake_list"], foodx, foody, x1, y1,
         s["current_direction"], s["steps_since_food"], device
     )
-    replay_buffer.append((dead_state.detach(), s["action_idx"], DEATH_PENALTY))
-    EPSILON = max(EPSILON_MIN, EPSILON * EPSILON_DECAY)
+    episode_trajectory.append((dead_state.detach(), s["action_idx"], DEATH_PENALTY))
+
+    # Train on the completed episode, then discard
+    train_step(episode_trajectory)
+    episode_trajectory.clear()
+    episode_count += 1
+
+    if episode_count % PLOT_REFRESH_INTERVAL == 0:
+        update_plot()
+
     new_s = reset_episode()
     return new_s, generate_food(new_s["snake_list"])
 
 
 def game_loop():
-    global TOTAL_STEPS, EPSILON
-
     s = reset_episode()
     foodx, foody = generate_food(s["snake_list"])
     game_over = False
@@ -192,18 +212,16 @@ def game_loop():
             s, (foodx, foody) = die(s, foodx, foody, x1, y1)
             continue
 
-        ## Build state once — used for both inference and replay buffer
+        ## Build state once — used for both inference and trajectory
         state = build_state(
             s["snake_list"], foodx, foody, x1, y1,
             s["current_direction"], s["steps_since_food"], device
         )
         output = model(state)
 
-        ## Epsilon-greedy action selection
-        if random.random() < EPSILON and TOTAL_STEPS < EXPLORATION_STEPS:
-            s["action_idx"] = random.randint(0, 3)
-        else:
-            s["action_idx"] = torch.argmax(output).item()
+        ## Sample action from the policy distribution 
+        dist = torch.distributions.Categorical(output)
+        s["action_idx"] = dist.sample().item()
 
         ## Apply velocity (no 180-degree reversal)
         requested = DIRECTION_MAP[s["action_idx"]]
@@ -216,7 +234,7 @@ def game_loop():
         elif requested == "DOWN"  and s["y1_change"] != -SNAKE_BLOCK:
             s["x1_change"], s["y1_change"] = 0,  SNAKE_BLOCK
 
-        ## Sync direction to *actual* movement so next state reflects reality
+        ## Sync direction to actual movement
         actual = VELOCITY_TO_DIR.get((s["x1_change"], s["y1_change"]))
         if actual:
             s["direction"]         = actual
@@ -226,7 +244,7 @@ def game_loop():
         display_score(s["length"] - 1)
         pygame.display.update()
 
-        ## Per-step reward (freshly computed each step, never accumulated)
+        ## Per-step reward
         reward = STEP_PENALTY
         prev_dist = abs(prev_x - foodx) + abs(prev_y - foody)
         curr_dist = abs(x1   - foodx) + abs(y1   - foody)
@@ -241,15 +259,7 @@ def game_loop():
             s["steps_since_food"] = 0
             reward += FOOD_REWARD
 
-        replay_buffer.append((state.detach(), s["action_idx"], reward))
-
-        ## Train when buffer is ready
-        if len(replay_buffer) >= BATCH_SIZE:
-            train_step()
-            if TOTAL_STEPS % PLOT_REFRESH_INTERVAL == 0:
-                update_plot()
-
-        TOTAL_STEPS += 1
+        episode_trajectory.append((state.detach(), s["action_idx"], reward))
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:

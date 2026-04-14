@@ -1,6 +1,6 @@
 # Snake Game with Reinforcement Learning
 
-A self-playing Snake game that trains a neural network agent using policy gradient RL.
+A self-playing Snake game that trains a neural network agent using REINFORCE (policy gradient).
 
 ## Files
 - `snake_game.py` - Game loop, training logic, and rendering
@@ -9,21 +9,28 @@ A self-playing Snake game that trains a neural network agent using policy gradie
 
 ## How it works
 
-The agent observes a 2408-dimensional state vector:
-- **2400 values** — 60×40 grid with 1s where the snake body is
-- **2 values** — normalized food position
-- **2 values** — normalized head position
-- **4 values** — one-hot direction (UP / DOWN / LEFT / RIGHT)
+The agent observes a compact **11-dimensional** state vector:
+- **4 values** — danger signals (wall or body 1 step away in UP/DOWN/LEFT/RIGHT)
+- **2 values** — relative food direction (normalized dx, dy)
+- **4 values** — current direction one-hot (UP / DOWN / LEFT / RIGHT)
+- **1 value** — urgency (steps since last food eaten, normalized)
 
-This is fed through a 2-layer feed-forward network that outputs a probability over 4 actions. The agent trains with a simple policy gradient: actions that led to higher rewards are reinforced.
+This is fed through a 2-hidden-layer network (11 → 128 → 64 → 4) that outputs a probability distribution over 4 actions. The agent **samples** actions from this distribution during training.
+
+**Training algorithm — REINFORCE:**
+- Collect a full episode trajectory (state, action, reward at each step)
+- At episode end, compute **discounted returns** G_t = r_t + γ·r_{t+1} + γ²·r_{t+2} + ...
+- Normalize returns (zero mean, unit std) for variance reduction
+- Update policy: reinforce actions that led to higher returns
+- Entropy bonus prevents premature policy collapse
+- Gradient clipping for training stability
 
 **Reward shaping:**
-- `-0.4` per step (discourages wandering)
-- `+2.0` when moving closer to food
-- `+20.0` for eating food
-- `-30.0` for dying (wall or self-collision)
-
-Exploration uses epsilon-greedy decay from 1.0 → 0.1 over 100k steps.
+- `-0.01` per step (discourages wandering)
+- `+0.02` when moving closer to food
+- `+1.0` for eating food
+- `-1.0` for dying (wall collision, self-collision, or starvation)
+- Starvation: agent dies after 200 steps without eating
 
 ## Setup
 
@@ -46,17 +53,17 @@ python snake_game.py
 
 Two windows will open side by side:
 1. **Game window** — watch the snake move and grow in real time
-2. **Loss plot** — live training loss updates every 50 steps
+2. **Loss plot** — live training loss updates every 50 episodes
 
 ## What to watch for as it learns
 
 | Phase | What you'll see |
 |---|---|
-| **Early (0–5k steps)** | Snake moves randomly, dies quickly, mostly explores |
-| **Mid (5k–50k steps)** | Epsilon decays, snake starts heading toward food more consistently |
-| **Late (50k+ steps)** | Exploitation dominates, snake navigates toward food reliably; loss curve flattens |
+| **Early (0–200 episodes)** | Snake moves somewhat randomly, dies quickly, explores via sampling |
+| **Mid (200–1000 episodes)** | Snake starts heading toward food more consistently, survives longer |
+| **Late (1000+ episodes)** | Snake navigates toward food reliably, avoids walls and its own body |
 
-The loss plot will appear noisy at first — that's normal. A downward trend over thousands of steps is the signal that learning is happening.
+The loss plot will appear noisy at first — that's normal. A downward trend over hundreds of episodes is the signal that learning is happening.
 
 Close the game window to stop training and display the final loss curve.
 
